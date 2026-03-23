@@ -1,44 +1,71 @@
-import os
 from google import genai
+from google.genai import types
+import os
 
-# Try to load the client if the key is available
-try:
-    client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-except Exception as e:
-    client = None
-    print("Warning: Could not initialize genai.Client.", e)
+api_key = os.getenv("GEMINI_API_KEY") 
+client = genai.Client(api_key=api_key) if api_key else None
 
-DEFAULT_MODEL = 'gemini-2.5-flash'
-
-def call_llm(messages, tools=None):
+def call_llm(messages, tools):
     """
-    High-level entry point to call the LLM.
-    For Gemini with automatic tool calls, this handles the loop behind the scenes.
+    Standard interface to call the LLM regardless of provider.
+    messages: list of standard dictionaries {"role": ..., "content": ..., etc}
+    tools: list of raw python functions
     """
     if not client:
-        raise ValueError("LLM Client not initialized. Check GEMINI_API_KEY.")
-        
-    config = {}
-    if tools:
-        config['tools'] = tools
-        
-    return client.models.generate_content(
-        model=DEFAULT_MODEL,
-        contents=messages,
-        config=config
+        raise Exception("No Gemini client configured.")
+    
+    gemini_contents = []
+    for msg in messages:
+        role = msg.get("role")
+        if role == "user":
+            gemini_contents.append(types.Content(role="user", parts=[types.Part.from_text(text=msg["content"])]))
+        elif role == "assistant":
+            if msg.get("tool_calls"):
+                parts = []
+                for tc in msg["tool_calls"]:
+                    parts.append(types.Part.from_function_call(
+                        name=tc["name"], 
+                        args=tc["args"]
+                    ))
+                gemini_contents.append(types.Content(role="model", parts=parts))
+            else:
+                gemini_contents.append(types.Content(role="model", parts=[types.Part.from_text(text=msg.get("content", ""))]))
+        elif role == "tool":
+            gemini_contents.append(types.Content(
+                role="user",
+                parts=[types.Part.from_function_response(
+                    name=msg["tool_name"],
+                    response={"result": msg["content"]}
+                )]
+            ))
+            
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=gemini_contents,
+        config=types.GenerateContentConfig(
+            tools=tools,
+            temperature=0.0
+        )
     )
+    return response
 
-def extract_text(response) -> str:
-    """Extract text from the response."""
-    if hasattr(response, "text"):
-        return response.text
-    return str(response)
-
-# Stubs for manual tool calling loop (useful when switching to Claude)
 def parse_tool_call(response):
-    """Extract a tool call from the response if present."""
-    pass
+    """Extracts requested tool calls from the provider's response format."""
+    if response and getattr(response, "function_calls", None):
+        calls = []
+        for fc in response.function_calls:
+            calls.append({
+                "id": fc.name, # Gemini function calls uniquely map back by name in the response
+                "name": fc.name,
+                "args": dict(fc.args) if fc.args else {}
+            })
+        return calls
+    return None
 
-def format_tool_result(tool_use_id, result):
-    """Format the tool execution result to be sent back to the LLM."""
-    pass
+def format_tool_result(tool_name, result_str):
+    """Formats the executed tool return value into our generic message format."""
+    return {
+        "role": "tool",
+        "tool_name": tool_name,
+        "content": str(result_str)
+    }

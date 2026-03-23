@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Import our LLM adapter (this is the ONLY file we'll need to swap for Claude)
-from llm_client import call_llm, extract_text
+from llm_client import call_llm
 
 # Import the webhooks router
 from webhooks import webhook_router
@@ -27,11 +27,10 @@ async def chat_endpoint(request: ChatRequest):
     try:
         # Use our adapter to handle the LLM interaction
         response = call_llm(
-            messages=request.message,
+            messages=[{"role": "user", "content": request.message}],
             tools=[get_weather]
         )
-        response_text = extract_text(response)
-        return {"response": response_text}
+        return {"response": getattr(response, "text", "No text generated.")}
     except Exception as e:
         print(f"Detailed Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))

@@ -132,6 +132,23 @@ async def github_webhook(request: Request, x_hub_signature_256: str = Header(Non
                         
                     print(f"Auto-ingestion complete. Stored {len(chunks)} chunks for {len(changed_file_names)} files.")
 
+                from agent import run_single_agent
+                
+                pr_diff_overview = ""
+                for file_data in files_changed:
+                    pr_diff_overview += f"\n--- {file_data['filename']} ---\n{file_data.get('patch', 'No diff extracted')}\n"
+                    
+                print(f"Triggering Core Agent reasoning cycle for {repo_url}...")
+                final_review = run_single_agent(
+                    repo_url=repo_url,
+                    pr_diff=pr_diff_overview,
+                    question="Please evaluate ONLY the specific code lines modified in the PR diff for security, performance, and code quality issues. Do NOT review the entire repository."
+                )
+                
+                print("\n\n====== FINAL AGENT PR REVIEW ======\n")
+                print(final_review)
+                print("\n===================================\n")
+
             return {"status": "success", "message": "PR processed", "metadata": pr_metadata}
             
     return {"status": "ignored", "message": f"Ignored event: {event}"}
