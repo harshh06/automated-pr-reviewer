@@ -123,7 +123,7 @@ async def run_agents_in_parallel(repo_url: str, pr_diff: str) -> str:
     aggregator_instruction = (
         "You are the Lead Master Orchestrator. Aggregate these three isolated unedited expert sub-agent reviews into ONE final structured GitHub Pull Request comment.\n"
         "Be extremely clean. Use markdown natively.\n"
-        "Format headers exactly like this:\n### 🔒 Security\n### ⚡ Performance\n### 📋 Code Quality\n\n"
+        "Format headers exactly like this:\n## 🤖 Automated PR Review\n\n### 🔒 Security\n### ⚡ Performance\n### 📋 Code Quality\n\n"
         f"Raw Security Findings:\n{sec_findings}\n\n"
         f"Raw Performance Findings:\n{perf_findings}\n\n"
         f"Raw Code Quality Findings:\n{qual_findings}"

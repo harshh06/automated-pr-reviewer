@@ -1,7 +1,10 @@
 from google import genai
 from google.genai import types
 import os
+import time
 from dotenv import load_dotenv
+from google.genai.errors import ClientError
+import random
 
 load_dotenv()
 api_key = os.getenv("GEMINI_API_KEY") 
@@ -41,15 +44,30 @@ def call_llm(messages, tools):
                 )]
             ))
             
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=gemini_contents,
-        config=types.GenerateContentConfig(
-            tools=tools,
-            temperature=0.0
-        )
-    )
-    return response
+    # Try up to 5 times dynamically for strict Free Tier limits
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            response = client.models.generate_content(
+                model="gemini-2.5-flash-lite",
+                contents=gemini_contents,
+                config=types.GenerateContentConfig(
+                    tools=tools if tools else None
+                )
+            )
+            return response
+        except ClientError as e:
+            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                if attempt < max_retries - 1:
+                    jitter = random.randint(10, 50)
+                    print(f"⚠️ Google API Limit hit ({attempt + 1}/{max_retries}). Coasting for {60 + jitter}s to stagger threads...")
+                    time.sleep(60 + jitter)
+                else:
+                    print("❌ Final Attempt failed. Google rate limits persist.")
+                    raise e
+            else:
+                # If it's a completely unrelated error (e.g. 500 server crash), throw immediately.
+                raise e
 
 def parse_tool_call(response):
     """Extracts requested tool calls from the provider's response format."""

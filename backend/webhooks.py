@@ -150,6 +150,19 @@ async def github_webhook(request: Request, x_hub_signature_256: str = Header(Non
                 print("\n\n====== FINAL AGENT PR REVIEW ======\n")
                 print(final_review)
                 print("\n===================================\n")
+                
+                # --- MILESTONE 6: POST GITHUB COMMENT ---
+                try:
+                    if gh_client:
+                        print(f"Posting automated review to PR #{pr_number}...")
+                        repo = gh_client.get_repo(repo_full_name)
+                        pull = repo.get_pull(pr_number)
+                        pull.create_issue_comment(final_review)
+                        print("Successfully posted PR comment!")
+                    else:
+                        print("Warning: gh_client not initialized. Cannot post GitHub comment.")
+                except Exception as e:
+                    print(f"Error posting GitHub comment: {e}")
 
             return {"status": "success", "message": "PR processed", "metadata": pr_metadata}
             
