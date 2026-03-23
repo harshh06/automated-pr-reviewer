@@ -1,6 +1,8 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from dotenv import load_dotenv
+import uvicorn
+import os
 
 load_dotenv()
 
@@ -34,3 +36,7 @@ async def chat_endpoint(request: ChatRequest):
     except Exception as e:
         print(f"Detailed Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8080))
+    uvicorn.run(app, host="0.0.0.0", port=port)
