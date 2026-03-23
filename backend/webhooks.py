@@ -132,17 +132,19 @@ async def github_webhook(request: Request, x_hub_signature_256: str = Header(Non
                         
                     print(f"Auto-ingestion complete. Stored {len(chunks)} chunks for {len(changed_file_names)} files.")
 
-                from agent import run_single_agent
+                # --- MILESTONE 5: TRIGGER MULTI-AGENT REVIEW ---
+                from agent import run_agents_in_parallel
                 
                 pr_diff_overview = ""
                 for file_data in files_changed:
                     pr_diff_overview += f"\n--- {file_data['filename']} ---\n{file_data.get('patch', 'No diff extracted')}\n"
                     
-                print(f"Triggering Core Agent reasoning cycle for {repo_url}...")
-                final_review = run_single_agent(
+                print(f"Triggering Core Orchestrator reasoning cycle for {repo_url}...")
+                
+                # We strictly await the parallel network pipeline!
+                final_review = await run_agents_in_parallel(
                     repo_url=repo_url,
-                    pr_diff=pr_diff_overview,
-                    question="Please evaluate ONLY the specific code lines modified in the PR diff for security, performance, and code quality issues. Do NOT review the entire repository."
+                    pr_diff=pr_diff_overview
                 )
                 
                 print("\n\n====== FINAL AGENT PR REVIEW ======\n")
