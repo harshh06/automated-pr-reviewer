@@ -1,21 +1,23 @@
+from contextvars import ContextVar
+
 from embeddings import search
 from ingestion import fetch_specific_files, gh_client, IGNORED_DIRS, is_allowed
 import os
 
-# Store the global tracking context required by the tools
-_CURRENT_NAMESPACE = ""
-_CURRENT_REPO_URL = ""
+# Async-safe per-request context (each asyncio.Task inherits a snapshot)
+_CURRENT_NAMESPACE: ContextVar[str] = ContextVar("_CURRENT_NAMESPACE", default="")
+_CURRENT_REPO_URL: ContextVar[str] = ContextVar("_CURRENT_REPO_URL", default="")
 
 def set_tool_context(namespace: str, repo_url: str):
-    global _CURRENT_NAMESPACE, _CURRENT_REPO_URL
-    _CURRENT_NAMESPACE = namespace
-    _CURRENT_REPO_URL = repo_url
+    _CURRENT_NAMESPACE.set(namespace)
+    _CURRENT_REPO_URL.set(repo_url)
 
 def search_codebase(query: str) -> str:
     """Semantic search over the repository's Pinecone embeddings. Returns 5 closest code chunks matching the query string semantics. Use this first to find where things might be."""
-    if not _CURRENT_NAMESPACE:
+    ns = _CURRENT_NAMESPACE.get()
+    if not ns:
         return "Error: Repository namespace not set."
-    results = search(query, _CURRENT_NAMESPACE, top_k=5)
+    results = search(query, ns, top_k=5)
     if not results:
         return "No semantic matches found."
     
@@ -27,10 +29,11 @@ def search_codebase(query: str) -> str:
 
 def read_file(file_path: str) -> str:
     """Fetches the full text content of a specific file in the repository. Provide the full relative string filepath."""
-    if not _CURRENT_REPO_URL:
+    repo_url = _CURRENT_REPO_URL.get()
+    if not repo_url:
         return "Error: Repository URL not set."
     
-    files = fetch_specific_files(_CURRENT_REPO_URL, [file_path])
+    files = fetch_specific_files(repo_url, [file_path])
     if not files:
         return f"File '{file_path}' not found or could not be read."
     return files[0]["content"]
@@ -39,10 +42,11 @@ def list_files(directory: str) -> str:
     """Lists all files cleanly inside a specific repository directory. Pass empty string '' for the root directory."""
     if not gh_client:
         return "GitHub client not initialized."
-    if not _CURRENT_REPO_URL:
+    repo_url = _CURRENT_REPO_URL.get()
+    if not repo_url:
         return "Repository URL not set."
         
-    repo_name = _CURRENT_REPO_URL.replace("https://github.com/", "")
+    repo_name = repo_url.replace("https://github.com/", "")
     repo = gh_client.get_repo(repo_name)
     
     try:
@@ -64,11 +68,12 @@ def list_files(directory: str) -> str:
 
 def grep_code(pattern: str) -> str:
     """Exact string search (substring) across the entire indexed repository code. Enter a short string to search for occurrences natively across GitHub."""
-    if not _CURRENT_REPO_URL:
+    repo_url = _CURRENT_REPO_URL.get()
+    if not repo_url:
         return "Error: Repository URL not set."
         
     try:
-        repo_name = _CURRENT_REPO_URL.replace("https://github.com/", "")
+        repo_name = repo_url.replace("https://github.com/", "")
         
         # We leverage GitHub native Search API
         results = gh_client.search_code(query=f"{pattern} repo:{repo_name}")

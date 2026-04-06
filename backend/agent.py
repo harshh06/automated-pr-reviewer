@@ -75,17 +75,18 @@ def create_specialized_agent():
     graph.set_entry_point("llm")
     return graph.compile()
 
-# Generate isolated graph engines
-security_agent_executor = create_specialized_agent()
-performance_agent_executor = create_specialized_agent()
-quality_agent_executor = create_specialized_agent()
 
 async def run_agents_in_parallel(repo_url: str, pr_diff: str) -> str:
     """Orchestrator Node managing Fan-out and Aggregation behavior."""
     namespace = get_namespace(repo_url)
     
-    # Establish the global context so Python tools know what Github repo they are pulling from natively!
+    # Establish the context so Python tools know what repo they are pulling from
     set_tool_context(namespace, repo_url)
+
+    # Fresh executors per review — no shared state across concurrent PRs
+    security_agent_executor = create_specialized_agent()
+    performance_agent_executor = create_specialized_agent()
+    quality_agent_executor = create_specialized_agent()
     
     print(f"\n--- Booting MULTI-AGENT ORCHESTRATOR for {repo_url} ---")
     
@@ -129,8 +130,8 @@ async def run_agents_in_parallel(repo_url: str, pr_diff: str) -> str:
         f"Raw Code Quality Findings:\n{qual_findings}"
     )
     
-    # Natively push the gigantic block back to the main LLM using the adapter
-    agg_response = call_llm([{"role": "user", "content": aggregator_instruction}], tools=[])
+    # Run the synchronous LLM call in a thread to keep the event loop responsive
+    agg_response = await asyncio.to_thread(call_llm, [{"role": "user", "content": aggregator_instruction}], [])
     
     final_review = getattr(agg_response, "text", None)
     if final_review is None and getattr(agg_response, "candidates", None) and agg_response.candidates:
