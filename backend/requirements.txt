@@ -1,8 +1,8 @@
-fastapi
-uvicorn
-pydantic
-google-genai
-python-dotenv
-PyGithub
-pinecone
-langgraph
+fastapi==0.128.8
+uvicorn==0.39.0
+pydantic==2.12.5
+google-genai==1.47.0
+python-dotenv==1.2.1
+PyGithub==2.9.0
+pinecone==7.3.0
+langgraph==0.6.11

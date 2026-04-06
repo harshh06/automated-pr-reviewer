@@ -1,4 +1,6 @@
 # embeddings.py
+import hashlib
+
 from pinecone import Pinecone
 from google import genai
 import os
@@ -46,7 +48,7 @@ def store_chunks(chunks: list[dict], namespace: str):
     index.upsert(
         vectors=[
             {
-                "id": f"{c['file_path']}_{i}",   # unique ID per chunk
+                "id": hashlib.md5(f"{c['file_path']}:{c['start_line']}".encode()).hexdigest(),
                 "values": vectors[i],
                 "metadata": {
                     "content": c["content"],
