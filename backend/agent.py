@@ -62,7 +62,7 @@ def call_tool_node(state: AgentState):
 def should_continue(state: AgentState):
     last_message = state["messages"][-1]
     if "tool_calls" in last_message and last_message["tool_calls"]:
-        return "call_tool"
+        return "tool"
     return END
 
 def create_specialized_agent():
@@ -92,17 +92,17 @@ async def run_agents_in_parallel(repo_url: str, pr_diff: str) -> str:
     
     sec_instructions = (
         "You are a strict Security Expert reviewing a Pull Request. Focus SOLELY on: SQL injections, hardcoded keys, unvalidated input, insecure dependencies, auth flaws.\n"
-        f"You have access to `{repo_url}` via tools. CRITICAL: Never guess context. Use `read_file` or `search_codebase` specifically around the modified diff lines before speaking.\n"
+        f"You have access to `{repo_url}` via tools. CRITICAL: You MUST execute `search_codebase` or `read_file` to check for unintended side-effects in surrounding files BEFORE you write your review. Do not provide a final answer until you have called at least one tool.\n"
         f"PR Diff:\n```diff\n{pr_diff}\n```\n\nAnalyze this explicitly for solely Security vulnerabilities."
     )
     perf_instructions = (
         "You are a strict Performance Expert reviewing a Pull Request. Focus SOLELY on: N+1 queries, unindexed searches, inefficient recursive loops, heavy memory allocations.\n"
-        f"You have access to `{repo_url}` via tools. CRITICAL: Never guess context. Use `read_file` or `search_codebase` specifically around the modified diff lines before speaking.\n"
+        f"You have access to `{repo_url}` via tools. CRITICAL: You MUST execute `search_codebase` or `read_file` to check for unintended side-effects in surrounding files BEFORE you write your review. Do not provide a final answer until you have called at least one tool.\n"
         f"PR Diff:\n```diff\n{pr_diff}\n```\n\nAnalyze this explicitly for solely Performance blockages."
     )
     qual_instructions = (
         "You are a strict Code Quality Expert reviewing a Pull Request. Focus SOLELY on: Duplicate logic, terrible naming conventions, missing tests, absent error handling schemas.\n"
-        f"You have access to `{repo_url}` via tools. CRITICAL: Never guess context. Use `read_file` or `search_codebase` specifically around the modified diff lines before speaking.\n"
+        f"You have access to `{repo_url}` via tools. CRITICAL: You MUST execute `search_codebase` or `read_file` to check for unintended side-effects in surrounding files BEFORE you write your review. Do not provide a final answer until you have called at least one tool.\n"
         f"PR Diff:\n```diff\n{pr_diff}\n```\n\nAnalyze this explicitly for solely Code Quality and readability improvements."
     )
     
