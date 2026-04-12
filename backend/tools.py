@@ -17,9 +17,15 @@ def search_codebase(query: str) -> str:
     ns = _CURRENT_NAMESPACE.get()
     if not ns:
         return "Error: Repository namespace not set."
+        
+    print(f"\n🌲 [PINECONE] Querying semantic vectors for: '{query}' (namespace: '{ns}')")
     results = search(query, ns, top_k=5)
+    
     if not results:
+        print("🌲 [PINECONE] No semantic matches found.")
         return "No semantic matches found."
+        
+    print(f"🌲 [PINECONE] Successfully retrieved {len(results)} relevant file chunks!")
     
     output = []
     for i, r in enumerate(results):
