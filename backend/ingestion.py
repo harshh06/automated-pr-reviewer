@@ -22,14 +22,15 @@ def is_allowed(file_path: str):
         return False
     return True
 
-def fetch_all_files(repo_url: str):
+def fetch_all_files(repo_url: str, client: Github = None):
     """Recursively fetch repository files via PyGithub for full ingestion."""
-    if not gh_client:
+    client = client or gh_client
+    if not client:
         print("WARNING: GITHUB_TOKEN not set. Cannot fetch all files.")
         return []
     
     repo_name = repo_url.replace("https://github.com/", "").replace("http://github.com/", "")
-    repo = gh_client.get_repo(repo_name)
+    repo = client.get_repo(repo_name)
     
     files = []
     try:
@@ -50,13 +51,14 @@ def fetch_all_files(repo_url: str):
         
     return files
 
-def fetch_specific_files(repo_url: str, changed_files: list, ref: str = None):
+def fetch_specific_files(repo_url: str, changed_files: list, ref: str = None, client: Github = None):
     """Fetch only the specific changed files for incremental indexing."""
-    if not gh_client:
+    client = client or gh_client
+    if not client:
         return []
         
     repo_name = repo_url.replace("https://github.com/", "").replace("http://github.com/", "")
-    repo = gh_client.get_repo(repo_name)
+    repo = client.get_repo(repo_name)
     
     files = []
     for file_path in changed_files:

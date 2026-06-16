@@ -166,6 +166,11 @@ async def _process_pr_review(repo_full_name: str, pr_number: int, files_changed:
     """Background task: ingestion + multi-agent review + GitHub comment."""
     from agent import run_agents_in_parallel
 
+    gh_client = get_github_client(installation_id)
+    if not gh_client:
+        print("[BG] Warning: gh_client not initialized. Cannot fetch files or post GitHub comment.")
+        return
+
     repo_url = f"https://github.com/{repo_full_name}"
     namespace = get_namespace(repo_url)
 
@@ -173,7 +178,7 @@ async def _process_pr_review(repo_full_name: str, pr_number: int, files_changed:
     print(f"[BG] Checking if {namespace} exists in Pinecone...")
     if not has_namespace(namespace):
         print(f"[BG] First time seeing {repo_url}! Running FULL repo ingestion...")
-        all_files = fetch_all_files(repo_url)
+        all_files = fetch_all_files(repo_url, gh_client)
         chunks = chunk_files(all_files)
         if chunks:
             store_chunks(chunks, namespace)
@@ -186,7 +191,7 @@ async def _process_pr_review(repo_full_name: str, pr_number: int, files_changed:
         for file_path in changed_file_names + removed_file_names:
             delete_file_chunks(file_path, namespace)
 
-        updated_files = fetch_specific_files(repo_url, changed_file_names, ref)
+        updated_files = fetch_specific_files(repo_url, changed_file_names, ref, gh_client)
         chunks = chunk_files(updated_files)
         if chunks:
             store_chunks(chunks, namespace)
@@ -216,12 +221,6 @@ async def _process_pr_review(repo_full_name: str, pr_number: int, files_changed:
     # --- POST GITHUB COMMENT (with retry) ---
     MAX_RETRIES = 3
     BASE_DELAY = 2  # seconds
-    
-    gh_client = get_github_client(installation_id)
-
-    if not gh_client:
-        print("[BG] Warning: gh_client not initialized. Cannot post GitHub comment.")
-        return
 
     for attempt in range(1, MAX_RETRIES + 1):
         try:
