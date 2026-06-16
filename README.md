@@ -71,20 +71,13 @@ graph TD
 
 ## Engineering Challenges
 
-### Parallel agents hitting rate limits
+### Parallel agents hitting rate limits and server errors
 
-Moving from a single agent to three parallel agents immediately caused problems. All three fired API requests to Gemini at the same moment, triggering `429 RESOURCE_EXHAUSTED` errors consistently.
+Moving from a single agent to three parallel agents immediately caused problems. All three fired API requests to Gemini at the same moment, triggering `429 RESOURCE_EXHAUSTED` and `503 UNAVAILABLE` (High Demand) errors consistently on the free tier.
 
-The fix was adding randomized jitter to the retry logic so agents don't wake up at the same time after hitting a limit:
+The fix was extracting all API logic into a centralized `retry_utils.py` module. It uses an exponential backoff strategy with randomized jitter to handle `503` server spikes gracefully, and fast-fails on unrecoverable Daily Quota limits. 
 
-```python
-if attempt < max_retries - 1:
-    jitter = random.randint(10, 50)
-    print(f"⚠️ Rate limit hit. Retrying in {60 + jitter}s...")
-    time.sleep(60 + jitter)
-```
-
-With jitter, agents stagger their retries naturally — Security might retry at +72s, Performance at +101s — which spreads the load and clears the burst ceiling without serializing the pipeline.
+Additionally, because Gemini 3.5 requires `thought_signatures` for tool calls, the code was updated to pass native `types.Content` objects directly through the message chain, avoiding complex JSON parsing errors during retries.
 
 ---
 
@@ -143,6 +136,9 @@ automated-pr-reviewer/
 │   ├── ingestion.py     # GitHub file fetching + chunking
 │   ├── llm_client.py    # All LLM-specific code (swap Gemini↔Claude here)
 │   ├── main.py          # FastAPI app, entry point
+│   ├── retry_utils.py   # Centralized Gemini API retry & backoff logic
+│   ├── test_multi_agent.py # Local multi-agent run simulator
+│   ├── test_retry_utils.py # Unit tests for API error handling
 │   ├── tools.py         # search_codebase, read_file, grep_code
 │   ├── webhooks.py      # Webhook verification + PR event handling
 │   ├── requirements.txt

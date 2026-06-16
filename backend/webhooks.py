@@ -3,6 +3,7 @@ import hmac
 import hashlib
 import random
 import time
+import json
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, Header
 from pydantic import BaseModel
 from typing import Optional, List
@@ -26,6 +27,55 @@ gh_client = Github(GITHUB_TOKEN) if GITHUB_TOKEN else None
 INGEST_API_KEY = os.getenv("INGEST_API_KEY")
 if not INGEST_API_KEY:
     print("WARNING: INGEST_API_KEY is not set. /ingest endpoint will reject all requests.")
+
+USAGE_FILE = "usage_db.json"
+MAX_PRS_PER_USER = 2
+MAX_TOTAL_PRS = 50   # Hard cap for the entire demo across ALL users
+MAX_PR_FILES = 10
+MAX_PR_LINES = 300
+
+def check_user_quota(username: str) -> bool:
+    """Returns True if user is within quota, False otherwise."""
+    # Whitelist the repo owner so you don't get locked out of your own project
+    if username == "harshh06":
+        return True
+        
+    usage = {}
+    if os.path.exists(USAGE_FILE):
+        try:
+            with open(USAGE_FILE, "r") as f:
+                usage = json.load(f)
+        except json.JSONDecodeError:
+            pass
+            
+    # --- AUTO-RESET LOGIC (24 Hours) ---
+    current_time = time.time()
+    last_reset = usage.get("LAST_RESET_TIME", current_time)
+    
+    # If 24 hours (86400 seconds) have passed, clear everything!
+    if current_time - last_reset > 86400:
+        print("[Quota] 24 hours have passed! Resetting all usage limits.")
+        usage = {"LAST_RESET_TIME": current_time}
+    elif "LAST_RESET_TIME" not in usage:
+        usage["LAST_RESET_TIME"] = current_time
+            
+    # Check GLOBAL hard limit first
+    global_count = usage.get("GLOBAL_TOTAL_DEMO_COUNT", 0)
+    if global_count >= MAX_TOTAL_PRS:
+        return False
+
+    # Check PER-USER limit
+    count = usage.get(username, 0)
+    if count >= MAX_PRS_PER_USER:
+        return False
+        
+    usage[username] = count + 1
+    usage["GLOBAL_TOTAL_DEMO_COUNT"] = global_count + 1
+    
+    with open(USAGE_FILE, "w") as f:
+        json.dump(usage, f)
+        
+    return True
 
 def verify_signature(payload_body: bytes, signature_header: str) -> bool:
     """Verifies the HMAC-SHA256 signature from GitHub."""
@@ -197,9 +247,17 @@ async def github_webhook(
             branch = payload["pull_request"]["head"]["ref"]
             
             files_changed = []
+            total_lines = 0
             if gh_client:
                 repo = gh_client.get_repo(repo_full_name)
                 pr = repo.get_pull(pr_number)
+                
+                # --- 1. USER QUOTA CHECK ---
+                if not check_user_quota(author):
+                    msg = f"👋 Hi @{author}! **PR Sentinel** is currently a free demo project. To prevent API abuse, guests are limited to {MAX_PRS_PER_USER} automated reviews. You've reached the limit!"
+                    pr.create_issue_comment(msg)
+                    print(f"Skipped PR #{pr_number}: User @{author} exceeded quota.")
+                    return {"status": "ignored", "message": "User quota exceeded"}
                 
                 for f in pr.get_files():
                     files_changed.append({
@@ -209,6 +267,14 @@ async def github_webhook(
                         "deletions": f.deletions,
                         "patch": getattr(f, "patch", "")
                     })
+                    total_lines += (f.additions + f.deletions)
+
+                # --- 2. PR SIZE LIMIT CHECK ---
+                if len(files_changed) > MAX_PR_FILES or total_lines > MAX_PR_LINES:
+                    msg = f"👋 Hi @{author}! **PR Sentinel** is running as a free public demo. To protect API limits, I can only review small PRs (Under {MAX_PR_FILES} files and {MAX_PR_LINES} lines).\n\nThis PR has **{len(files_changed)} files** and **{total_lines} lines** changed. Please submit a smaller PR!"
+                    pr.create_issue_comment(msg)
+                    print(f"Skipped PR #{pr_number}: Too large ({len(files_changed)} files, {total_lines} lines).")
+                    return {"status": "ignored", "message": "PR too large"}
 
             pr_metadata = {
                 "repo": repo_full_name,
