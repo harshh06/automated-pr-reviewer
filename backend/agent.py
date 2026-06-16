@@ -4,7 +4,7 @@ import operator
 import asyncio
 import copy
 
-from llm_client import call_llm, parse_tool_call, format_tool_result
+from llm_client import call_llm, parse_tool_call, format_tool_result, get_raw_model_content
 from tools import agent_tools, set_tool_context
 from embeddings import get_namespace
 
@@ -19,21 +19,25 @@ def call_llm_node(state: AgentState):
     """The node that actually queries the LLM with the available messaging history and tools."""
     messages = state["messages"]
     domain = state.get("domain", "general")
-    
+
     # We pass the shared array of tools
     response = call_llm(messages, tools=agent_tools)
-    
+    raw_content = get_raw_model_content(response)
+
     tool_calls = parse_tool_call(response)
     if tool_calls:
-        # LLM requested an explicit function execution
-        return {"messages": [{"role": "assistant", "tool_calls": tool_calls}]}
+        # Store the raw Content object so call_llm can replay it with
+        # thought_signatures intact on the next turn.
+        return {"messages": [
+            raw_content,
+            {"role": "assistant", "tool_calls": tool_calls}
+        ]}
     else:
         # LLM generated final human string answer
         final_text = getattr(response, "text", None)
-        if final_text is None and getattr(response, "candidates", None) and response.candidates:
-            parts = response.candidates[0].content.parts
-            final_text = "".join(getattr(p, "text", "") for p in parts)
-            
+        if final_text is None and raw_content and raw_content.parts:
+            final_text = "".join(getattr(p, "text", "") for p in raw_content.parts)
+
         return {"messages": [{"role": "assistant", "content": final_text or ""}]}
 
 def call_tool_node(state: AgentState):
@@ -42,34 +46,43 @@ def call_tool_node(state: AgentState):
     if state.get("namespace") and state.get("repo_url"):
         set_tool_context(state.get("namespace"), state.get("repo_url"), state.get("ref"))
         
-    last_msg = state["messages"][-1]
-    
+    last_msg = None
+    for msg in reversed(state["messages"]):
+        if isinstance(msg, dict) and "tool_calls" in msg:
+            last_msg = msg
+            break
+    if not last_msg:
+        return {"messages": []}
+
     tool_results = []
-    if "tool_calls" in last_msg:
-        for tc in last_msg["tool_calls"]:
-            tool_name = tc["name"]
-            tool_args = tc.get("args", {})
+    for tc in last_msg["tool_calls"]:
+        tool_name = tc["name"]
+        tool_args = tc.get("args", {})
+        
+        func_map = {f.__name__: f for f in agent_tools}
+        func = func_map.get(tool_name)
+        
+        if func:
+            try:
+                print(f"[{state.get('domain', 'Agent').upper()}] Executing tool '{tool_name}'...")
+                result = func(**tool_args)
+            except Exception as e:
+                result = f"Error executing {tool_name}: {str(e)}"
+        else:
+            result = f"Unknown tool: {tool_name}"
             
-            func_map = {f.__name__: f for f in agent_tools}
-            func = func_map.get(tool_name)
-            
-            if func:
-                try:
-                    print(f"[{state.get('domain', 'Agent').upper()}] Executing tool '{tool_name}'...")
-                    result = func(**tool_args)
-                except Exception as e:
-                    result = f"Error executing {tool_name}: {str(e)}"
-            else:
-                result = f"Unknown tool: {tool_name}"
-                
-            tool_results.append(format_tool_result(tool_name, result))
+        tool_results.append(format_tool_result(tool_name, result))
             
     return {"messages": tool_results}
 
 def should_continue(state: AgentState):
-    last_message = state["messages"][-1]
-    if "tool_calls" in last_message and last_message["tool_calls"]:
-        return "tool"
+    """Check the last dict-type message to decide if tools need executing."""
+    # Walk backwards to find the last dict message (skip raw Content objects)
+    for msg in reversed(state["messages"]):
+        if isinstance(msg, dict):
+            if "tool_calls" in msg and msg["tool_calls"]:
+                return "tool"
+            return END
     return END
 
 def create_specialized_agent():
@@ -123,9 +136,16 @@ async def run_agents_in_parallel(repo_url: str, pr_diff: str, ref: str = None) -
     results = await asyncio.gather(sec_task, perf_task, qual_task)
     print("> Orchestrator: All sub-agents successfully completed! Aggregating...")
 
-    sec_findings = results[0]["messages"][-1]["content"]
-    perf_findings = results[1]["messages"][-1]["content"]
-    qual_findings = results[2]["messages"][-1]["content"]
+    def _extract_final_text(result):
+        """Walk backwards to find the final text answer (a dict with 'content')."""
+        for msg in reversed(result["messages"]):
+            if isinstance(msg, dict) and "content" in msg:
+                return msg["content"]
+        return ""
+
+    sec_findings = _extract_final_text(results[0])
+    perf_findings = _extract_final_text(results[1])
+    qual_findings = _extract_final_text(results[2])
 
     # Final Orchestrator Sync (Formatting Node)
     aggregator_instruction = (
