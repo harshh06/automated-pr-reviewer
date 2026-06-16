@@ -7,7 +7,7 @@ import json
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, Header
 from pydantic import BaseModel
 from typing import Optional, List
-from github import Github, GithubException
+from github import Github, GithubException, Auth
 
 from ingestion import fetch_all_files, fetch_specific_files, chunk_files
 from embeddings import get_namespace, store_chunks, delete_file_chunks, has_namespace
@@ -21,8 +21,35 @@ if not GITHUB_WEBHOOK_SECRET:
         "GITHUB_WEBHOOK_SECRET is not set. "
         "Refusing to start — unauthenticated webhooks would allow anyone to trigger reviews."
     )
+# GitHub App config
+GITHUB_APP_ID = os.getenv("GITHUB_APP_ID")
+GITHUB_APP_PRIVATE_KEY = os.getenv("GITHUB_APP_PRIVATE_KEY")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-gh_client = Github(GITHUB_TOKEN) if GITHUB_TOKEN else None
+
+def get_github_client(installation_id: Optional[int] = None) -> Github:
+    """
+    Returns a dynamically authenticated PyGithub client.
+    If App ID, Private Key, and installation_id are present, acts as GitHub App.
+    Otherwise, falls back to the old GITHUB_TOKEN logic.
+    """
+    if GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY and installation_id:
+        try:
+            # Handle both filepath or raw string for private key
+            private_key = GITHUB_APP_PRIVATE_KEY
+            if os.path.exists(GITHUB_APP_PRIVATE_KEY):
+                with open(GITHUB_APP_PRIVATE_KEY, 'r') as f:
+                    private_key = f.read()
+
+            app_auth = Auth.AppAuth(app_id=GITHUB_APP_ID, private_key=private_key)
+            # PyGithub magically fetches the installation access token
+            installation_auth = app_auth.get_installation_auth(installation_id)
+            return Github(auth=installation_auth)
+        except Exception as e:
+            print(f"Failed to authenticate as GitHub App: {e}")
+            print("Falling back to GITHUB_TOKEN...")
+            
+    # Fallback to Personal Access Token
+    return Github(GITHUB_TOKEN) if GITHUB_TOKEN else None
 
 INGEST_API_KEY = os.getenv("INGEST_API_KEY")
 if not INGEST_API_KEY:
@@ -135,7 +162,7 @@ async def ingest_endpoint(
     return {"status": "done", "chunks_stored": len(chunks), "mode": mode}
 
 
-async def _process_pr_review(repo_full_name: str, pr_number: int, files_changed: list, ref: str = None):
+async def _process_pr_review(repo_full_name: str, pr_number: int, files_changed: list, ref: str = None, installation_id: Optional[int] = None):
     """Background task: ingestion + multi-agent review + GitHub comment."""
     from agent import run_agents_in_parallel
 
@@ -189,6 +216,8 @@ async def _process_pr_review(repo_full_name: str, pr_number: int, files_changed:
     # --- POST GITHUB COMMENT (with retry) ---
     MAX_RETRIES = 3
     BASE_DELAY = 2  # seconds
+    
+    gh_client = get_github_client(installation_id)
 
     if not gh_client:
         print("[BG] Warning: gh_client not initialized. Cannot post GitHub comment.")
@@ -245,9 +274,12 @@ async def github_webhook(
             pr_number = payload["pull_request"]["number"]
             author = payload["pull_request"]["user"]["login"]
             branch = payload["pull_request"]["head"]["ref"]
+            installation_id = payload.get("installation", {}).get("id")
             
             files_changed = []
             total_lines = 0
+            
+            gh_client = get_github_client(installation_id)
             if gh_client:
                 repo = gh_client.get_repo(repo_full_name)
                 pr = repo.get_pull(pr_number)
@@ -270,7 +302,7 @@ async def github_webhook(
                     total_lines += (f.additions + f.deletions)
 
                 # --- 2. PR SIZE LIMIT CHECK ---
-                if len(files_changed) > MAX_PR_FILES or total_lines > MAX_PR_LINES:
+                if author != "harshh06" and (len(files_changed) > MAX_PR_FILES or total_lines > MAX_PR_LINES):
                     msg = f"👋 Hi @{author}! **PR Sentinel** is running as a free public demo. To protect API limits, I can only review small PRs (Under {MAX_PR_FILES} files and {MAX_PR_LINES} lines).\n\nThis PR has **{len(files_changed)} files** and **{total_lines} lines** changed. Please submit a smaller PR!"
                     pr.create_issue_comment(msg)
                     print(f"Skipped PR #{pr_number}: Too large ({len(files_changed)} files, {total_lines} lines).")
@@ -289,7 +321,7 @@ async def github_webhook(
             if files_changed:
                 print(f"-> Extracted {len(files_changed)} files changed: {pr_metadata['files']}")
                 ref = payload["pull_request"]["head"]["sha"]
-                background_tasks.add_task(_process_pr_review, repo_full_name, pr_number, files_changed, ref)
+                background_tasks.add_task(_process_pr_review, repo_full_name, pr_number, files_changed, ref, installation_id)
 
             return {"status": "accepted", "message": "PR review queued", "metadata": pr_metadata}
             
