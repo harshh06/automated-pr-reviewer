@@ -6,3 +6,5 @@ python-dotenv==1.2.1
 PyGithub==2.9.0
 pinecone==7.3.0
 langgraph==0.6.11
+PyJWT>=2.8.0
+cryptography>=41.0.0
