@@ -2,6 +2,9 @@
 
 A fully autonomous GitHub PR reviewer that spins up three specialized AI agents in parallel — Security, Performance, and Code Quality — and posts a structured review directly on your pull request. No manual triggers. No dashboards. Just open a PR and get a review.
 
+> [!TIP]
+> **Try it yourself!** You can install the bot on your own public or private repositories right now.
+> 👉 **[Install PR Sentinel GitHub App](https://github.com/apps/sentinel-pr-reviewer-bot)** 
 ---
 
 ## How It Works
