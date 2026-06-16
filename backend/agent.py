@@ -13,6 +13,7 @@ class AgentState(TypedDict):
     domain: str
     namespace: str
     repo_url: str
+    ref: str
 
 def call_llm_node(state: AgentState):
     """The node that actually queries the LLM with the available messaging history and tools."""
@@ -39,7 +40,7 @@ def call_tool_node(state: AgentState):
     """The node that manually receives requests to run functions and acts as the runtime environment."""
     # Ensure ContextVars are set in this exact thread before tool execution
     if state.get("namespace") and state.get("repo_url"):
-        set_tool_context(state.get("namespace"), state.get("repo_url"))
+        set_tool_context(state.get("namespace"), state.get("repo_url"), state.get("ref"))
         
     last_msg = state["messages"][-1]
     
@@ -82,12 +83,12 @@ def create_specialized_agent():
     return graph.compile()
 
 
-async def run_agents_in_parallel(repo_url: str, pr_diff: str) -> str:
+async def run_agents_in_parallel(repo_url: str, pr_diff: str, ref: str = None) -> str:
     """Orchestrator Node managing Fan-out and Aggregation behavior."""
     namespace = get_namespace(repo_url)
     
     # Establish the context so Python tools know what repo they are pulling from
-    set_tool_context(namespace, repo_url)
+    set_tool_context(namespace, repo_url, ref)
 
     # Fresh executors per review — no shared state across concurrent PRs
     security_agent_executor = create_specialized_agent()
@@ -114,9 +115,9 @@ async def run_agents_in_parallel(repo_url: str, pr_diff: str) -> str:
     
     print("> Orchestrator: Dispatching sub-agents asynchronously...")
     # Fire all three isolated multi-turn graphs completely parallel asynchronously!
-    sec_task = security_agent_executor.ainvoke({"messages": [{"role": "user", "content": sec_instructions}], "domain": "Security", "namespace": namespace, "repo_url": repo_url})
-    perf_task = performance_agent_executor.ainvoke({"messages": [{"role": "user", "content": perf_instructions}], "domain": "Performance", "namespace": namespace, "repo_url": repo_url})
-    qual_task = quality_agent_executor.ainvoke({"messages": [{"role": "user", "content": qual_instructions}], "domain": "Quality", "namespace": namespace, "repo_url": repo_url})
+    sec_task = security_agent_executor.ainvoke({"messages": [{"role": "user", "content": sec_instructions}], "domain": "Security", "namespace": namespace, "repo_url": repo_url, "ref": ref})
+    perf_task = performance_agent_executor.ainvoke({"messages": [{"role": "user", "content": perf_instructions}], "domain": "Performance", "namespace": namespace, "repo_url": repo_url, "ref": ref})
+    qual_task = quality_agent_executor.ainvoke({"messages": [{"role": "user", "content": qual_instructions}], "domain": "Quality", "namespace": namespace, "repo_url": repo_url, "ref": ref})
 
     # Wait for all tools, searches, and reasoning blocks to complete globally.
     results = await asyncio.gather(sec_task, perf_task, qual_task)

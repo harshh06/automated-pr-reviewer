@@ -85,7 +85,7 @@ async def ingest_endpoint(
     return {"status": "done", "chunks_stored": len(chunks), "mode": mode}
 
 
-async def _process_pr_review(repo_full_name: str, pr_number: int, files_changed: list):
+async def _process_pr_review(repo_full_name: str, pr_number: int, files_changed: list, ref: str = None):
     """Background task: ingestion + multi-agent review + GitHub comment."""
     from agent import run_agents_in_parallel
 
@@ -109,12 +109,17 @@ async def _process_pr_review(repo_full_name: str, pr_number: int, files_changed:
         for file_path in changed_file_names + removed_file_names:
             delete_file_chunks(file_path, namespace)
 
-        updated_files = fetch_specific_files(repo_url, changed_file_names)
+        updated_files = fetch_specific_files(repo_url, changed_file_names, ref)
         chunks = chunk_files(updated_files)
         if chunks:
             store_chunks(chunks, namespace)
 
-        print(f"[BG] Auto-ingestion complete. Stored {len(chunks)} chunks for {len(changed_file_names)} files.")
+        skipped = len(changed_file_names) - len(updated_files)
+        print(
+            f"[BG] Auto-ingestion complete. "
+            f"Stored {len(chunks)} chunks for {len(updated_files)}/{len(changed_file_names)} files "
+            f"({skipped} skipped — deleted or not yet on default branch)."
+        )
 
     # --- MULTI-AGENT REVIEW ---
     pr_diff_overview = ""
@@ -217,7 +222,8 @@ async def github_webhook(
             print(f"Processed PR #{pr_number} from {repo_full_name} by {author}.")
             if files_changed:
                 print(f"-> Extracted {len(files_changed)} files changed: {pr_metadata['files']}")
-                background_tasks.add_task(_process_pr_review, repo_full_name, pr_number, files_changed)
+                ref = payload["pull_request"]["head"]["sha"]
+                background_tasks.add_task(_process_pr_review, repo_full_name, pr_number, files_changed, ref)
 
             return {"status": "accepted", "message": "PR review queued", "metadata": pr_metadata}
             

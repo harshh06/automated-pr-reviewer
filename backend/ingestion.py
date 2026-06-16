@@ -7,7 +7,7 @@ IGNORED_DIRS = {"node_modules", ".git", "build", "dist", "__pycache__"}
 
 # Approximating 500-1000 tokens using character length
 CHUNK_SIZE = 3000
-CHUNK_OVERLAP = 300
+CHUNK_OVERLAP = 750  # 25% overlap keeps function context across chunk boundaries
 
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 gh_client = Github(GITHUB_TOKEN) if GITHUB_TOKEN else None
@@ -50,7 +50,7 @@ def fetch_all_files(repo_url: str):
         
     return files
 
-def fetch_specific_files(repo_url: str, changed_files: list):
+def fetch_specific_files(repo_url: str, changed_files: list, ref: str = None):
     """Fetch only the specific changed files for incremental indexing."""
     if not gh_client:
         return []
@@ -62,7 +62,10 @@ def fetch_specific_files(repo_url: str, changed_files: list):
     for file_path in changed_files:
         if is_allowed(file_path):
             try:
-                file_content = repo.get_contents(file_path)
+                kwargs = {}
+                if ref:
+                    kwargs["ref"] = ref
+                file_content = repo.get_contents(file_path, **kwargs)
                 text = file_content.decoded_content.decode("utf-8")
                 files.append({"file_path": file_path, "content": text})
             except Exception as e:

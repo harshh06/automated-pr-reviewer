@@ -5,6 +5,7 @@ from pinecone import Pinecone
 from google import genai
 import os
 from dotenv import load_dotenv
+from retry_utils import call_with_gemini_retry
 
 load_dotenv()
 
@@ -29,10 +30,10 @@ def get_namespace(repo_url: str) -> str:
 def embed(texts: list[str]) -> list[list[float]]:
     if not gemini_client:
         raise ValueError("GEMINI_API_KEY is not defined.")
-    
-    # Send content string arrays to the embeddings API
-    result = gemini_client.models.embed_content(
-        model="gemini-embedding-2-preview",
+
+    result = call_with_gemini_retry(
+        gemini_client.models.embed_content,
+        model="gemini-embedding-2",
         contents=texts,
         config=genai.types.EmbedContentConfig(output_dimensionality=768)
     )

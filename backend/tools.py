@@ -7,10 +7,15 @@ import os
 # Async-safe per-request context (each asyncio.Task inherits a snapshot)
 _CURRENT_NAMESPACE: ContextVar[str] = ContextVar("_CURRENT_NAMESPACE", default="")
 _CURRENT_REPO_URL: ContextVar[str] = ContextVar("_CURRENT_REPO_URL", default="")
+_CURRENT_REF: ContextVar[str] = ContextVar("_CURRENT_REF", default="")
 
-def set_tool_context(namespace: str, repo_url: str):
+def set_tool_context(namespace: str, repo_url: str, ref: str = None):
     _CURRENT_NAMESPACE.set(namespace)
     _CURRENT_REPO_URL.set(repo_url)
+    if ref:
+        _CURRENT_REF.set(ref)
+    else:
+        _CURRENT_REF.set("")
 
 def search_codebase(query: str) -> str:
     """Semantic search over the repository's Pinecone embeddings. Returns 5 closest code chunks matching the query string semantics. Use this first to find where things might be."""
@@ -19,7 +24,7 @@ def search_codebase(query: str) -> str:
         return "Error: Repository namespace not set."
         
     print(f"\n🌲 [PINECONE] Querying semantic vectors for: '{query}' (namespace: '{ns}')")
-    results = search(query, ns, top_k=5)
+    results = search(query, ns, top_k=10)
     
     if not results:
         print("🌲 [PINECONE] No semantic matches found.")
@@ -39,7 +44,8 @@ def read_file(file_path: str) -> str:
     if not repo_url:
         return "Error: Repository URL not set."
     
-    files = fetch_specific_files(repo_url, [file_path])
+    ref = _CURRENT_REF.get()
+    files = fetch_specific_files(repo_url, [file_path], ref=ref if ref else None)
     if not files:
         return f"File '{file_path}' not found or could not be read."
     return files[0]["content"]
