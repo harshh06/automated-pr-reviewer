@@ -140,6 +140,7 @@ async def run_agents_in_parallel(repo_url: str, pr_diff: str, ref: str = None) -
         timeout=300,
     )
     print("> Orchestrator: All sub-agents successfully completed! Aggregating...")
+    print("> Orchestrator: This is a test commit to verify the deployment.")
 
     def _extract_final_text(result):
         """Walk backwards to find the final text answer (a dict with 'content')."""
