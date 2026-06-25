@@ -8,6 +8,6 @@ import redis
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
-# Restrict the connection pool to 5 connections max to prevent 
+# Restrict the connection pool to 10 connections max to prevent 
 # "ERR max number of clients reached" on the Redis Labs free tier.
-redis_client = redis.from_url(REDIS_URL, decode_responses=True, max_connections=5)
+redis_client = redis.from_url(REDIS_URL, decode_responses=True, max_connections=10)
