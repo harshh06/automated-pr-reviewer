@@ -133,7 +133,12 @@ async def run_agents_in_parallel(repo_url: str, pr_diff: str, ref: str = None) -
     qual_task = quality_agent_executor.ainvoke({"messages": [{"role": "user", "content": qual_instructions}], "domain": "Quality", "namespace": namespace, "repo_url": repo_url, "ref": ref})
 
     # Wait for all tools, searches, and reasoning blocks to complete globally.
-    results = await asyncio.gather(sec_task, perf_task, qual_task)
+    # Hard 5-minute cap: if any agent hangs (Gemini unresponsive), we don't wait forever.
+    # The caller (review_task in tasks.py) catches TimeoutError and schedules a retry.
+    results = await asyncio.wait_for(
+        asyncio.gather(sec_task, perf_task, qual_task),
+        timeout=300,
+    )
     print("> Orchestrator: All sub-agents successfully completed! Aggregating...")
 
     def _extract_final_text(result):
