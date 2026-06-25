@@ -208,8 +208,14 @@ async def github_webhook(
 
             # --- 4. ENQUEUE TO CELERY (durable, survives restarts) ---
             if files_changed:
+                issue = repo.get_issue(number=pr_number)
+                temp_comment = issue.create_comment(
+                    "⏳ **PR Sentinel** has queued your pull request for review.\n\n"
+                    "_This usually takes 1-3 minutes. If the AI service is experiencing high load, your review is safely queued and will post automatically._"
+                )
+                
                 from tasks import ingest_task
-                ingest_task.delay(repo_full_name, pr_number, files_changed, sha, installation_id)
+                ingest_task.delay(repo_full_name, pr_number, files_changed, sha, installation_id, temp_comment.id)
                 print(
                     f"[Webhook] Enqueued ingest_task for PR#{pr_number} "
                     f"from {repo_full_name} by {author}. "
