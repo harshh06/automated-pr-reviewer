@@ -1,14 +1,13 @@
 import os
 import hmac
 import hashlib
-import random
-import time
-import json
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, Header
+from fastapi import APIRouter, HTTPException, Request, Header
 from pydantic import BaseModel
 from typing import Optional, List
-from github import Github, GithubException, Auth
+from github import Github, Auth
 
+from redis_client import redis_client
+from quota import check_user_quota, MAX_PRS_PER_USER
 from ingestion import fetch_all_files, fetch_specific_files, chunk_files
 from embeddings import get_namespace, store_chunks, delete_file_chunks, has_namespace
 
@@ -55,54 +54,8 @@ INGEST_API_KEY = os.getenv("INGEST_API_KEY")
 if not INGEST_API_KEY:
     print("WARNING: INGEST_API_KEY is not set. /ingest endpoint will reject all requests.")
 
-USAGE_FILE = "usage_db.json"
-MAX_PRS_PER_USER = 2
-MAX_TOTAL_PRS = 50   # Hard cap for the entire demo across ALL users
 MAX_PR_FILES = 10
 MAX_PR_LINES = 300
-
-def check_user_quota(username: str) -> bool:
-    """Returns True if user is within quota, False otherwise."""
-    # Whitelist the repo owner so you don't get locked out of your own project
-    if username == "harshh06":
-        return True
-        
-    usage = {}
-    if os.path.exists(USAGE_FILE):
-        try:
-            with open(USAGE_FILE, "r") as f:
-                usage = json.load(f)
-        except json.JSONDecodeError:
-            pass
-            
-    # --- AUTO-RESET LOGIC (24 Hours) ---
-    current_time = time.time()
-    last_reset = usage.get("LAST_RESET_TIME", current_time)
-    
-    # If 24 hours (86400 seconds) have passed, clear everything!
-    if current_time - last_reset > 86400:
-        print("[Quota] 24 hours have passed! Resetting all usage limits.")
-        usage = {"LAST_RESET_TIME": current_time}
-    elif "LAST_RESET_TIME" not in usage:
-        usage["LAST_RESET_TIME"] = current_time
-            
-    # Check GLOBAL hard limit first
-    global_count = usage.get("GLOBAL_TOTAL_DEMO_COUNT", 0)
-    if global_count >= MAX_TOTAL_PRS:
-        return False
-
-    # Check PER-USER limit
-    count = usage.get(username, 0)
-    if count >= MAX_PRS_PER_USER:
-        return False
-        
-    usage[username] = count + 1
-    usage["GLOBAL_TOTAL_DEMO_COUNT"] = global_count + 1
-    
-    with open(USAGE_FILE, "w") as f:
-        json.dump(usage, f)
-        
-    return True
 
 def verify_signature(payload_body: bytes, signature_header: str) -> bool:
     """Verifies the HMAC-SHA256 signature from GitHub."""
@@ -162,110 +115,20 @@ async def ingest_endpoint(
     return {"status": "done", "chunks_stored": len(chunks), "mode": mode}
 
 
-async def _process_pr_review(repo_full_name: str, pr_number: int, files_changed: list, ref: str = None, installation_id: Optional[int] = None):
-    """Background task: ingestion + multi-agent review + GitHub comment."""
-    from agent import run_agents_in_parallel
-
-    gh_client = get_github_client(installation_id)
-    if not gh_client:
-        print("[BG] Warning: gh_client not initialized. Cannot fetch files or post GitHub comment.")
-        return
-
-    repo_url = f"https://github.com/{repo_full_name}"
-    namespace = get_namespace(repo_url)
-
-    # --- AUTO INCREMENTAL INGESTION ---
-    print(f"[BG] Checking if {namespace} exists in Pinecone...")
-    if not has_namespace(namespace):
-        print(f"[BG] First time seeing {repo_url}! Running FULL repo ingestion...")
-        all_files = fetch_all_files(repo_url, gh_client)
-        chunks = chunk_files(all_files)
-        if chunks:
-            store_chunks(chunks, namespace)
-        print(f"[BG] Full ingestion complete. Stored {len(chunks)} chunks for entire repo.")
-    else:
-        changed_file_names = [f["filename"] for f in files_changed if f["status"] != "removed"]
-        removed_file_names = [f["filename"] for f in files_changed if f["status"] == "removed"]
-
-        print(f"[BG] Running auto-incremental ingestion for {repo_url}...")
-        for file_path in changed_file_names + removed_file_names:
-            delete_file_chunks(file_path, namespace)
-
-        updated_files = fetch_specific_files(repo_url, changed_file_names, ref, gh_client)
-        chunks = chunk_files(updated_files)
-        if chunks:
-            store_chunks(chunks, namespace)
-
-        skipped = len(changed_file_names) - len(updated_files)
-        print(
-            f"[BG] Auto-ingestion complete. "
-            f"Stored {len(chunks)} chunks for {len(updated_files)}/{len(changed_file_names)} files "
-            f"({skipped} skipped — deleted or not yet on default branch)."
-        )
-
-    # --- MULTI-AGENT REVIEW ---
-    pr_diff_overview = ""
-    for file_data in files_changed:
-        pr_diff_overview += f"\n--- {file_data['filename']} ---\n{file_data.get('patch', 'No diff extracted')}\n"
-
-    print(f"[BG] Triggering Core Orchestrator reasoning cycle for {repo_url}...")
-    final_review = await run_agents_in_parallel(
-        repo_url=repo_url,
-        pr_diff=pr_diff_overview
-    )
-
-    print("\n\n====== FINAL AGENT PR REVIEW ======\n")
-    print(final_review)
-    print("\n===================================\n")
-
-    # --- POST GITHUB COMMENT (with retry) ---
-    MAX_RETRIES = 3
-    BASE_DELAY = 2  # seconds
-
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            print(f"[BG] Posting review to PR #{pr_number} (attempt {attempt}/{MAX_RETRIES})...")
-            repo = gh_client.get_repo(repo_full_name)
-            pull = repo.get_pull(pr_number)
-            pull.create_issue_comment(final_review)
-            print("[BG] Successfully posted PR comment!")
-            break
-        except GithubException as e:
-            status = e.status
-            is_transient = status >= 500 or status == 429
-            if is_transient and attempt < MAX_RETRIES:
-                delay = BASE_DELAY * (2 ** (attempt - 1)) + random.uniform(0, 1)
-                print(f"[BG] GitHub API error {status} on attempt {attempt}. Retrying in {delay:.1f}s...")
-                time.sleep(delay)
-            else:
-                print(f"[BG] GitHub API error {status} on attempt {attempt}. {'Non-retryable.' if not is_transient else 'Max retries exhausted.'}")
-                print(f"[BG] Failed to post review: {e.data}")
-                break
-        except Exception as e:
-            # Connection resets, timeouts, DNS failures, etc.
-            if attempt < MAX_RETRIES:
-                delay = BASE_DELAY * (2 ** (attempt - 1)) + random.uniform(0, 1)
-                print(f"[BG] Connection error on attempt {attempt}: {e}. Retrying in {delay:.1f}s...")
-                time.sleep(delay)
-            else:
-                print(f"[BG] Connection error on attempt {attempt}: {e}. Max retries exhausted.")
-                break
-
 
 @webhook_router.post("/webhook", status_code=202)
 async def github_webhook(
     request: Request,
-    background_tasks: BackgroundTasks,
     x_hub_signature_256: str = Header(None),
 ):
     payload_body = await request.body()
-    
+
     if not verify_signature(payload_body, x_hub_signature_256):
         raise HTTPException(status_code=401, detail="Invalid signature")
 
     payload = await request.json()
     event = request.headers.get("X-GitHub-Event")
-    
+
     if event == "pull_request":
         action = payload.get("action")
         if action in ["opened", "synchronize", "reopened"]:
@@ -273,38 +136,64 @@ async def github_webhook(
             pr_number = payload["pull_request"]["number"]
             author = payload["pull_request"]["user"]["login"]
             branch = payload["pull_request"]["head"]["ref"]
+            sha = payload["pull_request"]["head"]["sha"]
             installation_id = payload.get("installation", {}).get("id")
-            
+
+            # --- 1. IDEMPOTENCY CHECK ---
+            # Prevent duplicate jobs when GitHub re-pings the same webhook delivery.
+            # Key is scoped to repo + PR number + commit SHA so re-opens and new
+            # pushes to the same PR still trigger a fresh review.
+            idempotency_key = f"pr_review:{repo_full_name}:{pr_number}:{sha}"
+            already_queued = not redis_client.set(idempotency_key, "1", ex=3600, nx=True)
+            if already_queued:
+                print(f"[Webhook] Duplicate delivery for PR#{pr_number} sha={sha[:7]} — skipping.")
+                return {"status": "already_queued", "message": "Review already in progress for this commit"}
+
             files_changed = []
             total_lines = 0
-            
+
             gh_client = get_github_client(installation_id)
             if gh_client:
                 repo = gh_client.get_repo(repo_full_name)
                 pr = repo.get_pull(pr_number)
-                
-                # --- 1. USER QUOTA CHECK ---
+
+                # --- 2. USER QUOTA CHECK ---
                 if not check_user_quota(author):
-                    msg = f"👋 Hi @{author}! **PR Sentinel** is currently a free demo project. To prevent API abuse, guests are limited to {MAX_PRS_PER_USER} automated reviews. You've reached the limit!"
+                    msg = (
+                        f"👋 Hi @{author}! **PR Sentinel** is currently a free demo project. "
+                        f"To prevent API abuse, guests are limited to {MAX_PRS_PER_USER} automated reviews. "
+                        f"You've reached the limit!"
+                    )
                     pr.create_issue_comment(msg)
                     print(f"Skipped PR #{pr_number}: User @{author} exceeded quota.")
+                    # Release the idempotency key — quota block is not a "review in progress"
+                    redis_client.delete(idempotency_key)
                     return {"status": "ignored", "message": "User quota exceeded"}
-                
+
                 for f in pr.get_files():
                     files_changed.append({
                         "filename": f.filename,
                         "status": f.status,
                         "additions": f.additions,
                         "deletions": f.deletions,
-                        "patch": getattr(f, "patch", "")
+                        "patch": getattr(f, "patch", ""),
                     })
-                    total_lines += (f.additions + f.deletions)
+                    total_lines += f.additions + f.deletions
 
-                # --- 2. PR SIZE LIMIT CHECK ---
-                if author != "harshh06" and (len(files_changed) > MAX_PR_FILES or total_lines > MAX_PR_LINES):
-                    msg = f"👋 Hi @{author}! **PR Sentinel** is running as a free public demo. To protect API limits, I can only review small PRs (Under {MAX_PR_FILES} files and {MAX_PR_LINES} lines).\n\nThis PR has **{len(files_changed)} files** and **{total_lines} lines** changed. Please submit a smaller PR!"
+                # --- 3. PR SIZE LIMIT CHECK ---
+                if author != "harshh06" and (
+                    len(files_changed) > MAX_PR_FILES or total_lines > MAX_PR_LINES
+                ):
+                    msg = (
+                        f"👋 Hi @{author}! **PR Sentinel** is running as a free public demo. "
+                        f"To protect API limits, I can only review small PRs "
+                        f"(Under {MAX_PR_FILES} files and {MAX_PR_LINES} lines).\n\n"
+                        f"This PR has **{len(files_changed)} files** and **{total_lines} lines** changed. "
+                        f"Please submit a smaller PR!"
+                    )
                     pr.create_issue_comment(msg)
                     print(f"Skipped PR #{pr_number}: Too large ({len(files_changed)} files, {total_lines} lines).")
+                    redis_client.delete(idempotency_key)
                     return {"status": "ignored", "message": "PR too large"}
 
             pr_metadata = {
@@ -312,16 +201,21 @@ async def github_webhook(
                 "pr_number": pr_number,
                 "author": author,
                 "branch": branch,
+                "sha": sha[:7],
                 "files_changed_count": len(files_changed),
-                "files": [f["filename"] for f in files_changed]
+                "files": [f["filename"] for f in files_changed],
             }
-            
-            print(f"Processed PR #{pr_number} from {repo_full_name} by {author}.")
+
+            # --- 4. ENQUEUE TO CELERY (durable, survives restarts) ---
             if files_changed:
-                print(f"-> Extracted {len(files_changed)} files changed: {pr_metadata['files']}")
-                ref = payload["pull_request"]["head"]["sha"]
-                background_tasks.add_task(_process_pr_review, repo_full_name, pr_number, files_changed, ref, installation_id)
+                from tasks import ingest_task
+                ingest_task.delay(repo_full_name, pr_number, files_changed, sha, installation_id)
+                print(
+                    f"[Webhook] Enqueued ingest_task for PR#{pr_number} "
+                    f"from {repo_full_name} by {author}. "
+                    f"Files: {pr_metadata['files']}"
+                )
 
             return {"status": "accepted", "message": "PR review queued", "metadata": pr_metadata}
-            
+
     return {"status": "ignored", "message": f"Ignored event: {event}"}
