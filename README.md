@@ -11,31 +11,34 @@ A fully autonomous GitHub PR reviewer that spins up three specialized AI agents 
 
 When a developer opens a PR, GitHub fires a webhook to the FastAPI backend. From there:
 
-1. **Incremental ingestion** — only the changed files are re-embedded into Pinecone, keeping the vector index in sync without re-processing the entire repo every time
-2. **Multi-agent fan-out** — three specialized agents launch in parallel via `asyncio.gather()`, each with its own focus and system prompt
-3. **RAG-powered analysis** — each agent uses tool calling (`search_codebase`, `read_file`, `grep_code`) to retrieve relevant context from the vectorized codebase before drawing conclusions
-4. **Aggregated review** — findings from all three agents are merged into a single structured Markdown comment posted directly on the PR
+1. **Durable Task Queue** — webhook pushes a task to Redis and returns `202 Accepted` immediately, preventing GitHub webhook timeouts
+2. **Incremental ingestion** — a Celery worker picks up the job and re-embeds only the changed files into Pinecone
+3. **Multi-agent fan-out** — three specialized agents launch in parallel via `asyncio.gather()` inside the worker process
+4. **RAG-powered analysis** — each agent uses tool calling (`search_codebase`, `read_file`, `grep_code`) to retrieve relevant context
+5. **Aggregated review** — findings from all three agents are merged into a single structured Markdown comment posted directly on the PR
 
 ```mermaid
 graph TD
     A[Developer opens PR] -->|GitHub Webhook| B(FastAPI Server)
-    B --> C{Incremental Ingestion}
-    C -->|Sync changed files| D[(Pinecone Vector DB)]
-    C --> E[LangGraph Orchestrator]
+    B -->|Enqueue Task| Redis[(Redis Broker)]
+    Redis --> C(Celery Worker)
+    C --> D{Incremental Ingestion}
+    D -->|Sync changed files| E[(Pinecone Vector DB)]
+    D --> F[LangGraph Orchestrator]
 
-    E -->|asyncio.gather| F[🔒 Security Agent]
-    E -->|asyncio.gather| G[⚡ Performance Agent]
-    E -->|asyncio.gather| H[📋 Quality Agent]
+    F -->|asyncio.gather| G[🔒 Security Agent]
+    F -->|asyncio.gather| H[⚡ Performance Agent]
+    F -->|asyncio.gather| I[📋 Quality Agent]
 
-    F <-->|search_codebase / read_file| D
-    G <-->|search_codebase / read_file| D
-    H <-->|search_codebase / read_file| D
+    G <-->|search_codebase / read_file| E
+    H <-->|search_codebase / read_file| E
+    I <-->|search_codebase / read_file| E
 
-    F --> I[Aggregator Node]
-    G --> I
-    H --> I
+    G --> J[Aggregator Node]
+    H --> J
+    I --> J
 
-    I -->|PyGithub| J[Posts review comment on PR]
+    J -->|PyGithub| K[Posts review comment on PR]
 ```
 
 ---
@@ -44,7 +47,8 @@ graph TD
 
 | Layer | Technology |
 |---|---|
-| Backend | FastAPI, Uvicorn, Python 3.9 |
+| Backend | FastAPI, Uvicorn, Python 3.11 |
+| Task Queue / Broker | Celery + Redis Labs |
 | Agent Orchestration | LangGraph |
 | Vector Database | Pinecone (serverless) |
 | Embeddings | `gemini-embedding-2-preview` (768 dimensions) |
@@ -82,12 +86,21 @@ The fix was extracting all API logic into a centralized `retry_utils.py` module.
 
 Additionally, because Gemini 3.5 requires `thought_signatures` for tool calls, the code was updated to pass native `types.Content` objects directly through the message chain, avoiding complex JSON parsing errors during retries.
 
+### Webhook Timeouts and Thread Blocking
+
+Initially, FastAPI's `BackgroundTasks` was used to process the PRs asynchronously. However, GitHub requires webhooks to respond within 10 seconds. The webhook handler was inadvertently waiting on heavy synchronous GitHub API calls (like fetching PR files), and the AI processing itself blocked the underlying event loop during long waits. 
+
+If Gemini's API was down and exponential backoff triggered a 30-second `time.sleep()`, the entire event loop halted—blocking all other incoming webhook requests. 
+
+**The Solution:** The architecture was refactored to use a **Durable Task Queue**. FastAPI now immediately pushes the job to a Cloud Redis instance and returns `202 Accepted` to GitHub. A separate **Celery worker** process running in the same Docker container polls Redis, picks up the jobs, and executes the heavy LLM tasks. If an API request fails, the worker releases the thread, schedules a retry for the future in Redis, and picks up the next task.
+
 ---
 
 ## Setup
 
 ### Prerequisites
-- Python 3.9+
+- Python 3.11+
+- Redis (Local or Cloud instance like Redis Labs)
 - Pinecone account (free tier is enough)
 - Google AI Studio API key
 - GitHub repo with webhook access
@@ -99,24 +112,36 @@ git clone https://github.com/yourusername/pr-sentinel
 cd pr-sentinel
 python -m venv venv
 source venv/bin/activate
+cd backend
 pip install -r requirements.txt
 ```
 
 ### Environment variables
 
-Create a `.env` file:
+Create a `.env` file in the `backend/` directory:
 
 ```
 GEMINI_API_KEY=your_key
 PINECONE_API_KEY=your_key
 GITHUB_WEBHOOK_SECRET=your_secret
 GITHUB_TOKEN=your_token
+REDIS_URL=redis://localhost:6379/0
 ```
 
 ### Run
 
+You need two terminal windows to run both the web server and the worker locally:
+
+**Terminal 1 — FastAPI Server**
 ```bash
-uvicorn main:app --reload
+cd backend
+uvicorn main:app --reload --port 8080
+```
+
+**Terminal 2 — Celery Worker**
+```bash
+cd backend
+PYTHONPATH=$(pwd) celery -A celery_app worker --loglevel=info --concurrency=2
 ```
 
 Expose your local server with ngrok for webhook testing:
@@ -135,17 +160,21 @@ Then add `https://your-ngrok-url/webhook` as a webhook in your GitHub repo setti
 automated-pr-reviewer/
 ├── backend/
 │   ├── agent.py         # LangGraph multi-agent orchestration
+│   ├── celery_app.py    # Celery and Redis broker configuration
 │   ├── embeddings.py    # Pinecone store/search (all vector DB code)
 │   ├── ingestion.py     # GitHub file fetching + chunking
 │   ├── llm_client.py    # All LLM-specific code (swap Gemini↔Claude here)
 │   ├── main.py          # FastAPI app, entry point
+│   ├── quota.py         # Redis-backed atomic daily rate limiting
+│   ├── redis_client.py  # Centralized Redis connection manager
 │   ├── retry_utils.py   # Centralized Gemini API retry & backoff logic
-│   ├── test_multi_agent.py # Local multi-agent run simulator
-│   ├── test_retry_utils.py # Unit tests for API error handling
+│   ├── tasks.py         # Celery task definitions (ingest, review)
 │   ├── tools.py         # search_codebase, read_file, grep_code
-│   ├── webhooks.py      # Webhook verification + PR event handling
+│   ├── webhooks.py      # Webhook verification + Redis queueing
 │   ├── requirements.txt
 │   └── .env
+├── Dockerfile           # Multi-process container (uvicorn + celery)
+├── Procfile             # Process definitions for deployment
 ├── .gitignore
 ├── milestones.md
 └── README.md
