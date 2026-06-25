@@ -102,7 +102,7 @@ A durable queue introduced two new challenges:
 
 **The Solution:** 
 - The webhook now instantly posts a "⏳ **Queued**" placeholder comment to the PR *before* passing the job to Celery, along with the `comment_id`. When the Celery worker finishes, it perfectly overwrites the placeholder with the final review. If the worker encounters a non-recoverable error (like a completely exhausted API quota), it edits the placeholder to explain the exact failure reason.
-- Strict connection limits (`broker_pool_limit=2`, `max_connections=5`) were enforced across the stack to guarantee the app remains perfectly stable on the free tier, no matter how many Cloud Run instances spin up.
+- Strict connection limits (`broker_pool_limit=10`, `redis_max_connections=20`) were enforced across the stack to guarantee the app remains perfectly stable on the free tier, no matter how many Cloud Run instances spin up.
 
 ---
 
