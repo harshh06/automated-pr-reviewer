@@ -139,83 +139,114 @@ async def github_webhook(
             sha = payload["pull_request"]["head"]["sha"]
             installation_id = payload.get("installation", {}).get("id")
 
-            # --- 1. IDEMPOTENCY CHECK ---
-            # Prevent duplicate jobs when GitHub re-pings the same webhook delivery.
-            # Key is scoped to repo + PR number + commit SHA so re-opens and new
-            # pushes to the same PR still trigger a fresh review.
-            idempotency_key = f"pr_review:{repo_full_name}:{pr_number}:{sha}"
-            already_queued = not redis_client.set(idempotency_key, "1", ex=3600, nx=True)
-            if already_queued:
-                print(f"[Webhook] Duplicate delivery for PR#{pr_number} sha={sha[:7]} — skipping.")
-                return {"status": "already_queued", "message": "Review already in progress for this commit"}
+            try:
+                # --- 1. IDEMPOTENCY CHECK ---
+                # Prevent duplicate jobs when GitHub re-pings the same webhook delivery.
+                # Key is scoped to repo + PR number + commit SHA so re-opens and new
+                # pushes to the same PR still trigger a fresh review.
+                idempotency_key = f"pr_review:{repo_full_name}:{pr_number}:{sha}"
+                already_queued = not redis_client.set(idempotency_key, "1", ex=3600, nx=True)
+                if already_queued:
+                    print(f"[Webhook] Duplicate delivery for PR#{pr_number} sha={sha[:7]} — skipping.")
+                    return {"status": "already_queued", "message": "Review already in progress for this commit"}
 
-            files_changed = []
-            total_lines = 0
+                files_changed = []
+                total_lines = 0
 
-            gh_client = get_github_client(installation_id)
-            if gh_client:
-                repo = gh_client.get_repo(repo_full_name)
-                pr = repo.get_pull(pr_number)
+                gh_client = get_github_client(installation_id)
+                if gh_client:
+                    repo = gh_client.get_repo(repo_full_name)
+                    pr = repo.get_pull(pr_number)
 
-                # --- 2. USER QUOTA CHECK ---
-                if not check_user_quota(author):
-                    msg = (
-                        f"👋 Hi @{author}! **PR Sentinel** is currently a free demo project. "
-                        f"To prevent API abuse, guests are limited to {MAX_PRS_PER_USER} automated reviews. "
-                        f"You've reached the limit!"
+                    # --- 2. USER QUOTA CHECK ---
+                    if not check_user_quota(author):
+                        msg = (
+                            f"👋 Hi @{author}! **PR Sentinel** is currently a free demo project. "
+                            f"To prevent API abuse, guests are limited to {MAX_PRS_PER_USER} automated reviews. "
+                            f"You've reached the limit!"
+                        )
+                        pr.create_issue_comment(msg)
+                        print(f"Skipped PR #{pr_number}: User @{author} exceeded quota.")
+                        # Release the idempotency key — quota block is not a "review in progress"
+                        redis_client.delete(idempotency_key)
+                        return {"status": "ignored", "message": "User quota exceeded"}
+
+                    for f in pr.get_files():
+                        files_changed.append({
+                            "filename": f.filename,
+                            "status": f.status,
+                            "additions": f.additions,
+                            "deletions": f.deletions,
+                            "patch": getattr(f, "patch", ""),
+                        })
+                        total_lines += f.additions + f.deletions
+
+                    # --- 3. PR SIZE LIMIT CHECK ---
+                    if author != "harshh06" and (
+                        len(files_changed) > MAX_PR_FILES or total_lines > MAX_PR_LINES
+                    ):
+                        msg = (
+                            f"👋 Hi @{author}! **PR Sentinel** is running as a free public demo. "
+                            f"To protect API limits, I can only review small PRs "
+                            f"(Under {MAX_PR_FILES} files and {MAX_PR_LINES} lines).\n\n"
+                            f"This PR has **{len(files_changed)} files** and **{total_lines} lines** changed. "
+                            f"Please submit a smaller PR!"
+                        )
+                        pr.create_issue_comment(msg)
+                        print(f"Skipped PR #{pr_number}: Too large ({len(files_changed)} files, {total_lines} lines).")
+                        redis_client.delete(idempotency_key)
+                        return {"status": "ignored", "message": "PR too large"}
+
+                pr_metadata = {
+                    "repo": repo_full_name,
+                    "pr_number": pr_number,
+                    "author": author,
+                    "branch": branch,
+                    "sha": sha[:7],
+                    "files_changed_count": len(files_changed),
+                    "files": [f["filename"] for f in files_changed],
+                }
+
+                # --- 4. ENQUEUE TO CELERY (durable, survives restarts) ---
+                if files_changed:
+                    issue = repo.get_issue(number=pr_number)
+                    temp_comment = issue.create_comment(
+                        "⏳ **PR Sentinel** has queued your pull request for review.\n\n"
+                        "_This usually takes 1-3 minutes. If the AI service is experiencing high load, your review is safely queued and will post automatically._"
                     )
-                    pr.create_issue_comment(msg)
-                    print(f"Skipped PR #{pr_number}: User @{author} exceeded quota.")
-                    # Release the idempotency key — quota block is not a "review in progress"
-                    redis_client.delete(idempotency_key)
-                    return {"status": "ignored", "message": "User quota exceeded"}
-
-                for f in pr.get_files():
-                    files_changed.append({
-                        "filename": f.filename,
-                        "status": f.status,
-                        "additions": f.additions,
-                        "deletions": f.deletions,
-                        "patch": getattr(f, "patch", ""),
-                    })
-                    total_lines += f.additions + f.deletions
-
-                # --- 3. PR SIZE LIMIT CHECK ---
-                if author != "harshh06" and (
-                    len(files_changed) > MAX_PR_FILES or total_lines > MAX_PR_LINES
-                ):
-                    msg = (
-                        f"👋 Hi @{author}! **PR Sentinel** is running as a free public demo. "
-                        f"To protect API limits, I can only review small PRs "
-                        f"(Under {MAX_PR_FILES} files and {MAX_PR_LINES} lines).\n\n"
-                        f"This PR has **{len(files_changed)} files** and **{total_lines} lines** changed. "
-                        f"Please submit a smaller PR!"
+                    
+                    from tasks import ingest_task
+                    ingest_task.delay(repo_full_name, pr_number, files_changed, sha, installation_id, temp_comment.id)
+                    print(
+                        f"[Webhook] Enqueued ingest_task for PR#{pr_number} "
+                        f"from {repo_full_name} by {author}. "
+                        f"Files: {pr_metadata['files']}"
                     )
-                    pr.create_issue_comment(msg)
-                    print(f"Skipped PR #{pr_number}: Too large ({len(files_changed)} files, {total_lines} lines).")
-                    redis_client.delete(idempotency_key)
-                    return {"status": "ignored", "message": "PR too large"}
 
-            pr_metadata = {
-                "repo": repo_full_name,
-                "pr_number": pr_number,
-                "author": author,
-                "branch": branch,
-                "sha": sha[:7],
-                "files_changed_count": len(files_changed),
-                "files": [f["filename"] for f in files_changed],
-            }
+                return {"status": "accepted", "message": "PR review queued", "metadata": pr_metadata}
 
-            # --- 4. ENQUEUE TO CELERY (durable, survives restarts) ---
-            if files_changed:
-                from tasks import ingest_task
-                ingest_task.delay(repo_full_name, pr_number, files_changed, sha, installation_id)
-                print(
-                    f"[Webhook] Enqueued ingest_task for PR#{pr_number} "
-                    f"from {repo_full_name} by {author}. "
-                    f"Files: {pr_metadata['files']}"
-                )
-
-            return {"status": "accepted", "message": "PR review queued", "metadata": pr_metadata}
+            except Exception as e:
+                err_str = str(e).lower()
+                is_redis_error = "redis" in err_str or "max number of clients" in err_str or "connection" in err_str or "kombu" in err_str
+                
+                if is_redis_error:
+                    print(f"Redis Connection/Queue Failed: {e}")
+                    gh_client_fallback = get_github_client(installation_id)
+                    if gh_client_fallback:
+                        try:
+                            repo_fallback = gh_client_fallback.get_repo(repo_full_name)
+                            issue_fallback = repo_fallback.get_issue(number=pr_number)
+                            issue_fallback.create_comment(
+                                "⚠️ **System Overload:** The PR Sentinel queue is temporarily full and your review could not be queued.\n\n"
+                                "_Please try closing and reopening this PR in a few minutes, or push a new commit._"
+                            )
+                        except Exception as gh_error:
+                            print(f"Could not post GitHub error comment: {gh_error}")
+                            
+                    from fastapi.responses import JSONResponse
+                    return JSONResponse(status_code=503, content={"status": "error", "message": "Queue system overloaded"})
+                
+                # If it's a completely unrelated error, we still want it to fail so we can track it
+                raise e
 
     return {"status": "ignored", "message": f"Ignored event: {event}"}

@@ -94,6 +94,16 @@ If Gemini's API was down and exponential backoff triggered a 30-second `time.sle
 
 **The Solution:** The architecture was refactored to use a **Durable Task Queue**. FastAPI now immediately pushes the job to a Cloud Redis instance and returns `202 Accepted` to GitHub. A separate **Celery worker** process running in the same Docker container polls Redis, picks up the jobs, and executes the heavy LLM tasks. If an API request fails, the worker releases the thread, schedules a retry for the future in Redis, and picks up the next task.
 
+### Graceful UX & Connection Pooling
+
+A durable queue introduced two new challenges:
+1. **Ghosting the User:** While a PR sat in the queue during traffic spikes, the user saw no feedback and assumed the bot was broken.
+2. **Redis Connection Limits:** Scaling the app caused Uvicorn and Celery to open dozens of connection pools, instantly crashing the Redis Labs free tier limit (30 max connections).
+
+**The Solution:** 
+- The webhook now instantly posts a "⏳ **Queued**" placeholder comment to the PR *before* passing the job to Celery, along with the `comment_id`. When the Celery worker finishes, it perfectly overwrites the placeholder with the final review. If the worker encounters a non-recoverable error (like a completely exhausted API quota), it edits the placeholder to explain the exact failure reason.
+- Strict connection limits (`broker_pool_limit=2`, `max_connections=5`) were enforced across the stack to guarantee the app remains perfectly stable on the free tier, no matter how many Cloud Run instances spin up.
+
 ---
 
 ## Setup

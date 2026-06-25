@@ -43,4 +43,10 @@ celery_app.conf.update(
     task_acks_late=True,
     task_reject_on_worker_lost=True,
     worker_prefetch_multiplier=1,
+    
+    # ── Connection Limits for Free Tier Redis ──
+    # The Redis Labs free tier only allows 30 concurrent connections.
+    # Celery's default broker pool is 10 per process, which easily maxes it out.
+    broker_pool_limit=2,
+    redis_max_connections=5,
 )

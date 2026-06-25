@@ -71,6 +71,7 @@ def ingest_task(
     files_changed: list,
     sha: str,
     installation_id: Optional[int],
+    comment_id: Optional[int] = None,
 ):
     """
     Step 1: Ingest repo files into Pinecone.
@@ -124,7 +125,7 @@ def ingest_task(
 
     # ── Ingestion succeeded → chain to review ────────────────────────────────
     logger.info(f"[ingest_task] Done. Enqueuing review_task for PR#{pr_number}")
-    review_task.delay(repo_full_name, pr_number, files_changed, sha, installation_id)
+    review_task.delay(repo_full_name, pr_number, files_changed, sha, installation_id, comment_id)
 
 
 # ── Task 2: Review ────────────────────────────────────────────────────────────
@@ -141,6 +142,7 @@ def review_task(
     files_changed: list,
     sha: str,
     installation_id: Optional[int],
+    comment_id: Optional[int] = None,
 ):
     """
     Step 2: Run multi-agent review and post GitHub comment.
@@ -179,6 +181,14 @@ def review_task(
         # Daily quota is non-recoverable — don't retry
         if "PerDay" in err_str or "per day" in err_str.lower() or "Daily" in err_str:
             logger.error(f"[review_task] Daily Gemini quota exhausted. Giving up on PR#{pr_number}.")
+            gh_client_fallback = _get_github_client(installation_id)
+            if gh_client_fallback and comment_id:
+                try:
+                    repo_fallback = gh_client_fallback.get_repo(repo_full_name)
+                    comment = repo_fallback.get_issue(number=pr_number).get_comment(comment_id)
+                    comment.edit("❌ **Review Failed:** The daily API quota has been reached. Please try again tomorrow.")
+                except Exception as e:
+                    logger.error(f"Failed to update placeholder comment with quota error: {e}")
             return
 
         wait = BASE_BACKOFF ** attempt
@@ -202,9 +212,14 @@ def review_task(
 
     try:
         repo = gh_client.get_repo(repo_full_name)
-        pull = repo.get_pull(pr_number)
-        pull.create_issue_comment(final_review)
-        logger.info(f"[review_task] ✅ Posted review comment on PR#{pr_number}")
+        if comment_id:
+            comment = repo.get_issue(number=pr_number).get_comment(comment_id)
+            comment.edit(final_review)
+            logger.info(f"[review_task] ✅ Updated placeholder review comment on PR#{pr_number}")
+        else:
+            pull = repo.get_pull(pr_number)
+            pull.create_issue_comment(final_review)
+            logger.info(f"[review_task] ✅ Posted review comment on PR#{pr_number}")
 
         # Clear the idempotency key so re-opens of the same PR can be reviewed again
         idempotency_key = f"pr_review:{repo_full_name}:{pr_number}:{sha}"
