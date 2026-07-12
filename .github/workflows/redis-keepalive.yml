@@ -10,14 +10,19 @@ jobs:
   ping-redis:
     runs-on: ubuntu-latest
     steps:
-      - name: Install redis-cli
-        run: sudo apt-get update && sudo apt-get install -y redis-tools
+      - name: Install redis
+        run: pip install redis
 
       - name: Ping Redis
         env:
           REDIS_URL: ${{ secrets.REDIS_URL }}
         run: |
-          echo "Pinging Redis to prevent inactivity deletion..."
-          redis-cli -u "$REDIS_URL" PING
-          redis-cli -u "$REDIS_URL" SET "keepalive:last_ping" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" EX 604800
-          echo "✅ Redis keepalive successful"
+          python3 -c "
+          import redis, os, datetime
+          r = redis.from_url(os.environ['REDIS_URL'], decode_responses=True)
+          print('PING:', r.ping())
+          ts = datetime.datetime.utcnow().isoformat() + 'Z'
+          r.set('keepalive:last_ping', ts, ex=604800)
+          print(f'SET keepalive:last_ping = {ts}')
+          print('✅ Redis keepalive successful')
+          "
