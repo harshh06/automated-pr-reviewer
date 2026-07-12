@@ -1,0 +1,23 @@
+name: Redis Keepalive
+
+# Runs every 5 days to prevent Redis Cloud free-tier deletion due to inactivity
+on:
+  schedule:
+    - cron: '0 8 */5 * *'  # Every 5 days at 8:00 AM UTC
+  workflow_dispatch:        # Allow manual trigger from GitHub UI
+
+jobs:
+  ping-redis:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install redis-cli
+        run: sudo apt-get update && sudo apt-get install -y redis-tools
+
+      - name: Ping Redis
+        env:
+          REDIS_URL: ${{ secrets.REDIS_URL }}
+        run: |
+          echo "Pinging Redis to prevent inactivity deletion..."
+          redis-cli -u "$REDIS_URL" PING
+          redis-cli -u "$REDIS_URL" SET "keepalive:last_ping" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" EX 604800
+          echo "✅ Redis keepalive successful"
